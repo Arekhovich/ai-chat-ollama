@@ -4,6 +4,14 @@ import config
 from llm_client import send_request_to_llm
 
 
+def print_json_result(json_data) -> None:
+    """
+    Красиво печатает разобранный JSON-ответ модели.
+    """
+    import json as _json
+    print("\n🧩 JSON-ответ:")
+    print(_json.dumps(json_data, ensure_ascii=False, indent=2))
+
 def load_history(filepath: str) -> list:
     """
     Загружает историю диалога из JSON-файла.
@@ -87,7 +95,8 @@ def summarize_old_history(old_history: list) -> str:
         system_prompt=config.SUMMARY_SYSTEM_PROMPT,
         conversation_history=old_history,
         stream_mode=False,
-        log_request=False
+        log_request=False,
+        expect_json=False
     )
 
     if result and result.get("error") is None and result.get("content"):
@@ -164,6 +173,7 @@ def main() -> None:
         f"summary={config.ENABLE_SUMMARY} | "
         f"summary_trigger={config.SUMMARY_TRIGGER_MESSAGES} | "
         f"auto_save={config.AUTO_SAVE_HISTORY} | "
+        f"json_mode={config.ENABLE_JSON_MODE} | "
         f"stream={config.STREAM_MODE} | "
         f"log={config.LOG_USAGE}\n"
     )
@@ -181,6 +191,7 @@ def main() -> None:
             print("📚 История пуста\n")
 
     conversation_summary = ""
+    json_mode_enabled = config.ENABLE_JSON_MODE
 
     total_requests = 0
     total_tokens = 0
@@ -221,6 +232,11 @@ def main() -> None:
                 print("\n🧠 Сводка пока не создана\n")
             continue
 
+        if user_input.lower() == "/json":
+            json_mode_enabled = not json_mode_enabled
+            print(f"\n🧩 JSON-режим: {'включён' if json_mode_enabled else 'выключен'}\n")
+            continue
+
         if not user_input:
             print("⚠️ Введите текст вопроса\n")
             continue
@@ -250,7 +266,8 @@ def main() -> None:
 
         result = send_request_to_llm(
             user_input,
-            conversation_history=history_to_send
+            conversation_history=history_to_send,
+            expect_json=json_mode_enabled
         )
 
         if result is None:
@@ -268,6 +285,12 @@ def main() -> None:
                 print_response_meta(result)
             else:
                 print_response_details(result)
+
+            if json_mode_enabled:
+                if result.get("json_data") is not None:
+                    print_json_result(result["json_data"])
+                else:
+                    print("\n⚠️ Модель ответила текстом, но JSON разобрать не удалось.")
 
             if config.ENABLE_HISTORY and result.get("new_message"):
                 conversation_history.append({"role": "user", "content": user_input})

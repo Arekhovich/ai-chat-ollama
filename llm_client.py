@@ -43,8 +43,13 @@ def log_usage(result: dict) -> None:
         # "a" = append: старые записи не стираются, новая дописывается в конец
         f.write(f"{ts} | {model} | tokens={tokens_str} | {duration}s\n")
 
-def send_request_to_llm(user_message: str, system_prompt: str = config.SYSTEM_PROMPT,
-                        conversation_history: list | None = None) -> dict | None:
+def send_request_to_llm(
+    user_message: str,
+    system_prompt: str = config.SYSTEM_PROMPT,
+    conversation_history: list | None = None,
+    stream_mode: bool | None = None,
+    log_request: bool = True
+) -> dict | None:
     """
     Отправляет запрос к модели и возвращает словарь с результатом.
 
@@ -64,6 +69,8 @@ def send_request_to_llm(user_message: str, system_prompt: str = config.SYSTEM_PR
     if conversation_history:
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
+
+    use_stream = config.STREAM_MODE if stream_mode is None else stream_mode
 
     try:
         # Выбираем параметры подключения в зависимости от режима из config.py
@@ -88,7 +95,7 @@ def send_request_to_llm(user_message: str, system_prompt: str = config.SYSTEM_PR
 
         start_time = time.time()
 
-        if config.STREAM_MODE:
+        if use_stream:
             response_stream = completion(
                 model=model_name,
                 messages=messages,
@@ -124,7 +131,8 @@ def send_request_to_llm(user_message: str, system_prompt: str = config.SYSTEM_PR
                 "error": None,
                 "new_message":   {"role": "assistant", "content": content},
             }
-            log_usage(result)  # записываем в лог до return
+            if log_request:
+                log_usage(result)  # записываем в лог до return
             return result
         else:
             response = completion(
@@ -158,7 +166,8 @@ def send_request_to_llm(user_message: str, system_prompt: str = config.SYSTEM_PR
                 "error": None,
                 "new_message":   {"role": "assistant", "content": content},
             }
-            log_usage(result)
+            if log_request:
+                log_usage(result)
             return result
 
     except Timeout:

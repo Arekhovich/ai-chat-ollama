@@ -60,6 +60,56 @@ def get_context_window(history: list, limit: int) -> list:
 
     return history[-limit:]
 
+def build_summary_message(summary_text: str) -> dict:
+    """
+    Превращает текст сводки в сообщение,
+    которое можно передать модели как часть контекста.
+    """
+    return {
+        "role": "assistant",
+        "content": f"Краткое резюме предыдущей части диалога: {summary_text}"
+    }
+
+def summarize_old_history(old_history: list) -> str:
+    """
+    Создаёт краткую сводку старой части истории.
+    Если что-то пошло не так — возвращает пустую строку.
+    """
+    if not old_history:
+        return ""
+
+    result = send_request_to_llm(
+        user_message=(
+            "Сделай краткое резюме старой части диалога. "
+            "Сохрани только важные факты о пользователе, цели, предпочтения, "
+            "незавершённые темы и полезный контекст для продолжения разговора."
+        ),
+        system_prompt=config.SUMMARY_SYSTEM_PROMPT,
+        conversation_history=old_history,
+        stream_mode=False,
+        log_request=False
+    )
+
+    if result and result.get("error") is None and result.get("content"):
+        return result["content"].strip()
+
+    return ""
+
+def build_history_for_request(history: list, summary_text: str) -> list | None:
+    """
+    Собирает рабочий контекст для нового запроса:
+    сначала сводка, потом последние сообщения.
+    """
+    context = []
+
+    if summary_text:
+        context.append(build_summary_message(summary_text))
+
+    context.extend(history)
+
+    return context if context else None
+
+
 def print_response_details(result: dict) -> None:
     """Печатает текст ответа и метаданные. Используется в обычном режиме."""
     print(f"\n🦙 ИИ: {result['content']}")
@@ -111,6 +161,8 @@ def main() -> None:
         f"history={config.ENABLE_HISTORY} | "
         f"max_history={config.MAX_HISTORY_MESSAGES} | "
         f"context_limit={config.CONTEXT_MESSAGES_LIMIT} | "
+        f"summary={config.ENABLE_SUMMARY} | "
+        f"summary_trigger={config.SUMMARY_TRIGGER_MESSAGES} | "
         f"auto_save={config.AUTO_SAVE_HISTORY} | "
         f"stream={config.STREAM_MODE} | "
         f"log={config.LOG_USAGE}\n"
@@ -127,6 +179,8 @@ def main() -> None:
             print(f"📚 Загружено сообщений из файла: {len(conversation_history)}\n")
         else:
             print("📚 История пуста\n")
+
+    conversation_summary = ""
 
     total_requests = 0
     total_tokens = 0
@@ -147,6 +201,7 @@ def main() -> None:
                 else:
                     print("   Токены: n/a (стриминг или модель не вернула usage)")
                 print(f"   Сообщений в истории: {len(conversation_history)}")
+                print(f"   Сводка используется: {'да' if conversation_summary else 'нет'}")
 
             break
 
@@ -166,9 +221,22 @@ def main() -> None:
         print("\n🤔 Модель думает...")
 
         if config.ENABLE_HISTORY:
-            history_to_send = get_context_window(
+            recent_history = get_context_window(
                 conversation_history,
-                config.CONTEXT_MESSAGES_LIMIT,
+                config.CONTEXT_MESSAGES_LIMIT
+            )
+
+            if (
+                config.ENABLE_SUMMARY
+                and len(conversation_history) > config.SUMMARY_TRIGGER_MESSAGES
+                and len(conversation_history) > config.CONTEXT_MESSAGES_LIMIT
+            ):
+                old_history = conversation_history[:-config.CONTEXT_MESSAGES_LIMIT]
+                conversation_summary = summarize_old_history(old_history)
+
+            history_to_send = build_history_for_request(
+                recent_history,
+                conversation_summary
             )
         else:
             history_to_send = None

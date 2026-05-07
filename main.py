@@ -214,6 +214,13 @@ def main() -> None:
             print("\n🧹 История диалога очищена\n")
             continue
 
+        if user_input.lower() == "/summary":
+            if conversation_summary:
+                print(f"\n🧠 Текущая сводка:\n{conversation_summary}\n")
+            else:
+                print("\n🧠 Сводка пока не создана\n")
+            continue
+
         if not user_input:
             print("⚠️ Введите текст вопроса\n")
             continue

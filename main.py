@@ -4,61 +4,88 @@ import config
 from llm_client import send_request_to_llm
 
 
-def load_history(filepath: str) -> list:
+def load_memory_state(filepath: str) -> tuple[list, str]:
     """
-    Загружает историю диалога из JSON-файла.
-    Если файла нет или он повреждён — возвращает пустой список.
+    Загружает память приложения из JSON-файла.
+    Возвращает кортеж (history, summary).
+    Поддерживает старый формат: если в файле просто список — это история, сводка пустая.
     """
     if not os.path.exists(filepath):
-        return []
+        return [], ""
 
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            history = json.load(f)
+            data = json.load(f)
 
-        if not isinstance(history, list):
-            return []
-
-        cleaned_history = []
-        for item in history:
-            if (
+        # Поддержка старого формата (history.json из урока 4.2–4.5)
+        if isinstance(data, list):
+            cleaned_history = []
+            for item in data:
+                if (
                     isinstance(item, dict)
                     and item.get("role") in ("user", "assistant")
                     and isinstance(item.get("content"), str)
+                ):
+                    cleaned_history.append(
+                        {"role": item["role"], "content": item["content"]}
+                    )
+            return cleaned_history, ""
+
+        if not isinstance(data, dict):
+            return [], ""
+
+        raw_history = data.get("history", [])
+        raw_summary = data.get("summary", "")
+
+        if not isinstance(raw_history, list):
+            raw_history = []
+        if not isinstance(raw_summary, str):
+            raw_summary = ""
+
+        cleaned_history = []
+        for item in raw_history:
+            if (
+                isinstance(item, dict)
+                and item.get("role") in ("user", "assistant")
+                and isinstance(item.get("content"), str)
             ):
                 cleaned_history.append(
                     {"role": item["role"], "content": item["content"]}
                 )
 
-        return cleaned_history
+        return cleaned_history, raw_summary
 
     except (json.JSONDecodeError, OSError):
-        return []
+        return [], ""
 
 
-def save_history(filepath: str, history: list) -> None:
+def save_memory_state(filepath: str, history: list, summary: str) -> None:
     """
-    Сохраняет историю диалога в JSON-файл.
+    Сохраняет состояние памяти приложения в JSON-файл.
+    Формат: {"history": [...], "summary": "..."}
     """
+    data = {
+        "history": history,
+        "summary": summary,
+    }
+
     try:
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except OSError as e:
-        print(f"\n⚠️ Не удалось сохранить историю: {e}\n")
+        print(f"\n⚠️ Не удалось сохранить память: {e}\n")
+
 
 def get_context_window(history: list, limit: int) -> list:
     """
-    Возвращает только последние сообщения из истории
-    для отправки в модель.
-
-    Не удаляет ничего из самой истории — только делает срез.
-    history[-limit:] возвращает последние limit элементов.
-    Если история короче limit — вернёт весь список.
+    Возвращает только последние сообщения из истории,
+    которые нужно отправить модели.
     """
     if not history or limit <= 0:
         return []
 
     return history[-limit:]
+
 
 def build_summary_message(summary_text: str) -> dict:
     """
@@ -70,30 +97,40 @@ def build_summary_message(summary_text: str) -> dict:
         "content": f"Краткое резюме предыдущей части диалога: {summary_text}"
     }
 
-def summarize_old_history(old_history: list) -> str:
+
+def summarize_old_history(old_history: list, previous_summary: str = "") -> str:
     """
-    Создаёт краткую сводку старой части истории.
-    Если что-то пошло не так — возвращает пустую строку.
+    Создаёт обновлённую сводку на основе старой части истории
+    и уже существующей сводки (если есть).
+    При ошибке возвращает previous_summary без изменений.
     """
     if not old_history:
-        return ""
+        return previous_summary
+
+    summary_context = []
+    if previous_summary:
+        summary_context.append(build_summary_message(previous_summary))
+    summary_context.extend(old_history)
 
     result = send_request_to_llm(
         user_message=(
-            "Сделай краткое резюме старой части диалога. "
+            "Сделай краткое резюме прошлой части диалога. "
             "Сохрани только важные факты о пользователе, цели, предпочтения, "
-            "незавершённые темы и полезный контекст для продолжения разговора."
+            "незавершённые темы и полезный контекст для продолжения беседы. "
+            "Ответ дай короткой связной сводкой без приветствия."
         ),
         system_prompt=config.SUMMARY_SYSTEM_PROMPT,
-        conversation_history=old_history,
+        conversation_history=summary_context,
         stream_mode=False,
-        log_request=False
+        log_request=False,
+        expect_json=False
     )
 
     if result and result.get("error") is None and result.get("content"):
         return result["content"].strip()
 
-    return ""
+    return previous_summary
+
 
 def build_history_for_request(history: list, summary_text: str) -> list | None:
     """
@@ -110,14 +147,54 @@ def build_history_for_request(history: list, summary_text: str) -> list | None:
     return context if context else None
 
 
+def compress_history_if_needed(
+    history: list, summary_text: str
+) -> tuple[list, str]:
+    """
+    Если история превысила порог — сжимает старую часть в сводку.
+    Возвращает (обновлённая_история, обновлённая_сводка).
+    Если сжатие не нужно или не удалось — возвращает исходные данные.
+    """
+    if not config.ENABLE_SUMMARY:
+        return history, summary_text
+
+    if len(history) <= config.SUMMARY_TRIGGER_MESSAGES:
+        return history, summary_text
+
+    keep_count = config.RECENT_MESSAGES_AFTER_SUMMARY
+
+    if keep_count <= 0:
+        old_part = history
+        recent_part = []
+    else:
+        old_part = history[:-keep_count]
+        recent_part = history[-keep_count:]
+
+    if not old_part:
+        return history, summary_text
+
+    new_summary = summarize_old_history(old_part, summary_text)
+
+    if new_summary:
+        return recent_part, new_summary
+
+    return history, summary_text
+
+
+def print_json_result(json_data) -> None:
+    """
+    Красиво печатает разобранный JSON-ответ модели.
+    """
+    print("\n🧩 JSON-ответ:")
+    print(json.dumps(json_data, ensure_ascii=False, indent=2))
+
+
 def print_response_details(result: dict) -> None:
-    """Печатает текст ответа и метаданные. Используется в обычном режиме."""
     print(f"\n🦙 ИИ: {result['content']}")
     print_response_meta(result)
 
 
 def print_response_meta(result: dict) -> None:
-    """Печатает только метаданные. Используется в потоковом режиме."""
     print("\n📊 Метаданные:")
 
     mode_label = {
@@ -143,19 +220,19 @@ def print_response_meta(result: dict) -> None:
 
 def print_error_message(error_type: str) -> None:
     messages = {
-        "timeout": "\n⏱ Таймаут! Модель не ответила вовремя. Упростите запрос или увеличьте request_timeout.",
-        "rate_limit": "\n🚧 Слишком много запросов за короткое время. Подождите 1–2 минуты.",
+        "timeout":         "\n⏱ Таймаут! Модель не ответила вовремя. Упростите запрос или увеличьте request_timeout.",
+        "rate_limit":      "\n🚧 Слишком много запросов за короткое время. Подождите 1–2 минуты.",
         "model_not_found": "\n🤷 Модель не найдена. Проверьте название модели и список: ollama list",
-        "connection": "\n🔌 Сервер недоступен. Для Ollama проверьте, что она запущена: http://localhost:11434",
-        "no_api_key": "\n🔑 API-ключ не настроен. Добавьте OPENROUTER_API_KEY в config.py.",
-        "bad_mode": "\n⚙️ Неверный MODE в config.py. Используйте: local / ollama_cloud / openrouter.",
+        "connection":      "\n🔌 Сервер недоступен. Для Ollama проверьте, что она запущена и доступен http://localhost:11434",
+        "no_api_key":      "\n🔑 API-ключ не настроен. Добавьте OPENROUTER_API_KEY в config.py (MODE=openrouter).",
+        "bad_mode":        "\n⚙️ Неверный MODE в config.py. Используйте: local / ollama_cloud / openrouter.",
     }
     default_msg = "\n❌ Неизвестная ошибка. Попробуйте снова."
     print(messages.get(error_type, default_msg))
 
 
 def main() -> None:
-    print("🦙 AI-помощник (с памятью контекста) запущен!\n")
+    print("🦙 AI-помощник (с памятью и JSON-режимом) запущен!\n")
     print(
         f"📊 Режим: {config.MODE} | "
         f"history={config.ENABLE_HISTORY} | "
@@ -163,27 +240,32 @@ def main() -> None:
         f"context_limit={config.CONTEXT_MESSAGES_LIMIT} | "
         f"summary={config.ENABLE_SUMMARY} | "
         f"summary_trigger={config.SUMMARY_TRIGGER_MESSAGES} | "
-        f"auto_save={config.AUTO_SAVE_HISTORY} | "
+        f"recent_after_summary={config.RECENT_MESSAGES_AFTER_SUMMARY} | "
+        f"auto_save={config.AUTO_SAVE_MEMORY} | "
+        f"json_mode={config.ENABLE_JSON_MODE} | "
         f"stream={config.STREAM_MODE} | "
         f"log={config.LOG_USAGE}\n"
     )
 
-    print("Введите ваш вопрос (или 'выход' для завершения):\n")
-
     conversation_history = []
-
-    if config.ENABLE_HISTORY:
-        conversation_history = load_history(config.HISTORY_FILE)
-
-        if conversation_history:
-            print(f"📚 Загружено сообщений из файла: {len(conversation_history)}\n")
-        else:
-            print("📚 История пуста\n")
-
     conversation_summary = ""
 
+    if config.ENABLE_HISTORY:
+        conversation_history, conversation_summary = load_memory_state(config.MEMORY_FILE)
+
+        if conversation_history or conversation_summary:
+            print(
+                f"📚 Память загружена: "
+                f"сообщений={len(conversation_history)}, "
+                f"сводка={'есть' if conversation_summary else 'нет'}\n"
+            )
+        else:
+            print("📚 Память пуста\n")
+
+    print("Введите ваш вопрос (или 'выход' для завершения):\n")
+
     total_requests = 0
-    total_tokens = 0
+    total_tokens   = 0
 
     while True:
         user_input = input("👤 Вы: ").strip()
@@ -194,31 +276,48 @@ def main() -> None:
             if total_requests > 0:
                 print("\n📊 Статистика сессии:")
                 print(f"   Запросов: {total_requests}")
+
                 if total_tokens > 0:
                     avg = total_tokens // total_requests
                     print(f"   Токенов всего: {total_tokens}")
                     print(f"   В среднем: {avg} токенов/запрос")
                 else:
                     print("   Токены: n/a (стриминг или модель не вернула usage)")
-                print(f"   Сообщений в истории: {len(conversation_history)}")
-                print(f"   Сводка используется: {'да' if conversation_summary else 'нет'}")
+
+                print(f"   Сообщений в свежей истории: {len(conversation_history)}")
+                print(f"   Сводка памяти: {'есть' if conversation_summary else 'нет'}")
 
             break
 
         if user_input.lower() == "/clear":
             conversation_history.clear()
+            conversation_summary = ""
 
             if config.ENABLE_HISTORY:
-                save_history(config.HISTORY_FILE, conversation_history)
+                save_memory_state(
+                    config.MEMORY_FILE,
+                    conversation_history,
+                    conversation_summary
+                )
 
-            print("\n🧹 История диалога очищена\n")
+            print("\n🧹 История диалога и сводка памяти очищены\n")
             continue
 
-        if user_input.lower() == "/summary":
+        if user_input.lower() == "/memory":
             if conversation_summary:
-                print(f"\n🧠 Текущая сводка:\n{conversation_summary}\n")
+                print(f"\n🧠 Сводка памяти:\n{conversation_summary}\n")
             else:
-                print("\n🧠 Сводка пока не создана\n")
+                print("\n🧠 Сводка памяти пока пуста\n")
+            continue
+
+        if user_input.lower() == "/save":
+            if config.ENABLE_HISTORY:
+                save_memory_state(
+                    config.MEMORY_FILE,
+                    conversation_history,
+                    conversation_summary
+                )
+                print(f"\n💾 Память сохранена в {config.MEMORY_FILE}\n")
             continue
 
         if not user_input:
@@ -228,21 +327,8 @@ def main() -> None:
         print("\n🤔 Модель думает...")
 
         if config.ENABLE_HISTORY:
-            recent_history = get_context_window(
-                conversation_history,
-                config.CONTEXT_MESSAGES_LIMIT
-            )
-
-            if (
-                config.ENABLE_SUMMARY
-                and len(conversation_history) > config.SUMMARY_TRIGGER_MESSAGES
-                and len(conversation_history) > config.CONTEXT_MESSAGES_LIMIT
-            ):
-                old_history = conversation_history[:-config.CONTEXT_MESSAGES_LIMIT]
-                conversation_summary = summarize_old_history(old_history)
-
             history_to_send = build_history_for_request(
-                recent_history,
+                get_context_window(conversation_history, config.CONTEXT_MESSAGES_LIMIT),
                 conversation_summary
             )
         else:
@@ -250,7 +336,8 @@ def main() -> None:
 
         result = send_request_to_llm(
             user_input,
-            conversation_history=history_to_send
+            conversation_history=history_to_send,
+            expect_json=config.ENABLE_JSON_MODE
         )
 
         if result is None:
@@ -261,6 +348,7 @@ def main() -> None:
 
         else:
             total_requests += 1
+
             if result["total_tokens"] is not None:
                 total_tokens += result["total_tokens"]
 
@@ -269,17 +357,32 @@ def main() -> None:
             else:
                 print_response_details(result)
 
+            if config.ENABLE_JSON_MODE:
+                if result.get("json_data") is not None:
+                    print_json_result(result["json_data"])
+                else:
+                    print("\n⚠️ Модель ответила текстом, но JSON разобрать не удалось.")
+
             if config.ENABLE_HISTORY and result.get("new_message"):
                 conversation_history.append({"role": "user", "content": user_input})
                 conversation_history.append(result["new_message"])
+
+                conversation_history, conversation_summary = compress_history_if_needed(
+                    conversation_history,
+                    conversation_summary
+                )
 
                 while len(conversation_history) > config.MAX_HISTORY_MESSAGES:
                     conversation_history.pop(0)
                     if conversation_history:
                         conversation_history.pop(0)
 
-                if config.AUTO_SAVE_HISTORY:
-                    save_history(config.HISTORY_FILE, conversation_history)
+                if config.AUTO_SAVE_MEMORY:
+                    save_memory_state(
+                        config.MEMORY_FILE,
+                        conversation_history,
+                        conversation_summary
+                    )
 
 
 if __name__ == "__main__":

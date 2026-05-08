@@ -40,9 +40,10 @@ ENABLE_HISTORY = True
 # При превышении лимита старые пары user+assistant удаляются первыми.
 MAX_HISTORY_MESSAGES = 20
 
-HISTORY_FILE = "history.json"
-AUTO_SAVE_HISTORY = True
+MEMORY_FILE = "memory.json"
+AUTO_SAVE_MEMORY = True
 CONTEXT_MESSAGES_LIMIT = 8
+RECENT_MESSAGES_AFTER_SUMMARY = 6
 
 # Сжатие старой истории в краткую сводку
 ENABLE_SUMMARY = True
@@ -52,4 +53,11 @@ SUMMARY_SYSTEM_PROMPT = (
     "Сохраняй только важные факты о пользователе, цели, предпочтения, "
     "незавершённые темы и полезный контекст для продолжения разговора. "
     "Пиши кратко, ясно и только на русском языке."
+)
+
+ENABLE_JSON_MODE = False
+JSON_SYSTEM_PROMPT = (
+    "Ты должен отвечать только валидным JSON без пояснений, "
+    "без markdown и без лишнего текста вокруг JSON. "
+    "Если пользователь просит структуру, верни именно JSON."
 )

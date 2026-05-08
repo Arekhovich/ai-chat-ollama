@@ -1,4 +1,5 @@
 # llm_client.py
+import json
 import time
 from datetime import datetime
 import config  # читаем настройки из config.py
@@ -43,12 +44,26 @@ def log_usage(result: dict) -> None:
         # "a" = append: старые записи не стираются, новая дописывается в конец
         f.write(f"{ts} | {model} | tokens={tokens_str} | {duration}s\n")
 
+def parse_json_content(content: str):
+    """
+    Пытается разобрать ответ модели как JSON.
+    Если не получается — возвращает None.
+    """
+    if not content:
+        return None
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
 def send_request_to_llm(
     user_message: str,
     system_prompt: str = config.SYSTEM_PROMPT,
     conversation_history: list | None = None,
     stream_mode: bool | None = None,
-    log_request: bool = True
+    log_request: bool = True,
+    expect_json: bool = False
 ) -> dict | None:
     """
     Отправляет запрос к модели и возвращает словарь с результатом.
@@ -62,10 +77,14 @@ def send_request_to_llm(
 
     # Проверяем: если хотим openrouter, но ключ не задан — сразу говорим об этом
     if config.MODE == "openrouter" and not hasattr(config, "OPENROUTER_API_KEY"):
-        return {"error": "no_api_key", "content": None, "new_message": None}
+        return {"error": "no_api_key", "content": None, "new_message": None, "json_data": None}
+
+    effective_system_prompt = (
+        config.JSON_SYSTEM_PROMPT if expect_json else system_prompt
+    )
 
     messages = []
-    messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "system", "content": effective_system_prompt})
     if conversation_history:
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
@@ -91,7 +110,7 @@ def send_request_to_llm(
 
         else:
             # MODE задан неверно — возвращаем понятную ошибку
-            return {"error": "bad_mode", "content": None, "new_message": None}
+            return {"error": "bad_mode", "content": None, "new_message": None, "json_data": None}
 
         start_time = time.time()
 
@@ -119,7 +138,7 @@ def send_request_to_llm(
 
             print()                            # перевод строки после завершения ответа
             duration = time.time() - start_time
-
+            json_data = parse_json_content(content) if expect_json else None
             result = {
                 "content": content,
                 "model": model_name,
@@ -130,6 +149,7 @@ def send_request_to_llm(
                 "total_tokens": None,
                 "error": None,
                 "new_message":   {"role": "assistant", "content": content},
+                "json_data": json_data,
             }
             if log_request:
                 log_usage(result)  # записываем в лог до return
@@ -154,6 +174,7 @@ def send_request_to_llm(
             prompt_tokens = _get_usage_value(usage, "prompt_tokens")
             completion_tokens = _get_usage_value(usage, "completion_tokens")
             total_tokens = _get_usage_value(usage, "total_tokens")
+            json_data = parse_json_content(content) if expect_json else None
 
             result = {
                 "content": content,
@@ -165,20 +186,21 @@ def send_request_to_llm(
                 "total_tokens": total_tokens,
                 "error": None,
                 "new_message":   {"role": "assistant", "content": content},
+                "json_data": json_data,
             }
             if log_request:
                 log_usage(result)
             return result
 
     except Timeout:
-        return {"error": "timeout", "content": None, "new_message": None}
+        return {"error": "timeout", "content": None, "new_message": None, "json_data": None}
     except RateLimitError:
-        return {"error": "rate_limit", "content": None, "new_message": None}
+        return {"error": "rate_limit", "content": None, "new_message": None, "json_data": None}
     except NotFoundError:
-        return {"error": "model_not_found", "content": None, "new_message": None}
+        return {"error": "model_not_found", "content": None, "new_message": None, "json_data": None}
     except APIConnectionError:
-        return {"error": "connection", "content": None, "new_message": None}
+        return {"error": "connection", "content": None, "new_message": None, "json_data": None}
     except Exception as e:
-        return {"error": str(e), "content": None, "new_message": None}
+        return {"error": str(e), "content": None, "new_message": None, "json_data": None}
 
 
